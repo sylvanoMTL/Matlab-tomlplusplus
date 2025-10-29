@@ -162,6 +162,15 @@ std::unique_ptr<toml::node> convert_mx_to_node(const mxArray* mx) {
             return std::make_unique<toml::value<toml::date>>(date);
         }
         
+        // Check if it's time-only (date is default 1970-01-01)
+        if (y == 1970 && m == 1 && d == 1) {
+            // Time only - write as TOML local time
+            int sec = (int)s;
+            int nanosec = (int)((s - sec) * 1e9);
+            toml::time time{(unsigned)h, (unsigned)min, (unsigned)sec, (unsigned)nanosec};
+            return std::make_unique<toml::value<toml::time>>(time);
+        }
+        
         // Check for timezone - datetime objects store timezone info
         // Try to detect if timezone exists by checking if datetime is zoned
         bool has_timezone = false;
@@ -189,26 +198,6 @@ std::unique_ptr<toml::node> convert_mx_to_node(const mxArray* mx) {
             toml::date_time dt{date, time};
             return std::make_unique<toml::value<toml::date_time>>(dt);
         }
-    }
-    
-    // Handle MATLAB duration objects
-    if (strcmp(mxGetClassName(mx), "duration") == 0) {
-        // Convert duration to seconds
-        mxArray* secondsLhs[1];
-        mxArray* rhs[1] = {const_cast<mxArray*>(mx)};
-        mexCallMATLAB(1, secondsLhs, 1, rhs, "seconds");
-        
-        double total_seconds = mxGetScalar(secondsLhs[0]);
-        mxDestroyArray(secondsLhs[0]);
-        
-        int hours = (int)(total_seconds / 3600);
-        int minutes = (int)((total_seconds - hours * 3600) / 60);
-        double secs = total_seconds - hours * 3600 - minutes * 60;
-        int sec = (int)secs;
-        int nanosec = (int)((secs - sec) * 1e9);
-        
-        toml::time time{(unsigned)hours, (unsigned)minutes, (unsigned)sec, (unsigned)nanosec};
-        return std::make_unique<toml::value<toml::time>>(time);
     }
 
     if (mxIsLogical(mx)) {

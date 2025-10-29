@@ -85,5 +85,6 @@ if isfile(toml_file)
 
 end
 %
+compareStructs(pfas,pfas2)
 
 

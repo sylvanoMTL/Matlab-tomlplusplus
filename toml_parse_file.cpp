@@ -237,17 +237,25 @@ mxArray* convert_node(const toml::node& node) {
     }
     
     if (auto val = node.as_time()) {
-        // Local time only - create duration
+        // Local time only - create datetime with default date (1970-01-01) and the time
         auto t = val->get();
         
-        // Create MATLAB duration: hours(h) + minutes(m) + seconds(s)
-        double total_seconds = t.hour * 3600.0 + t.minute * 60.0 + t.second + t.nanosecond / 1e9;
+        // Create MATLAB datetime: datetime(1970, 1, 1, hour, minute, second)
+        mxArray* dateArgs[6];
+        dateArgs[0] = mxCreateDoubleScalar(1970);  // Default year
+        dateArgs[1] = mxCreateDoubleScalar(1);     // Default month
+        dateArgs[2] = mxCreateDoubleScalar(1);     // Default day
+        dateArgs[3] = mxCreateDoubleScalar(t.hour);
+        dateArgs[4] = mxCreateDoubleScalar(t.minute);
+        dateArgs[5] = mxCreateDoubleScalar(t.second + t.nanosecond / 1e9);
         
-        mxArray* secondsArg = mxCreateDoubleScalar(total_seconds);
         mxArray* lhs[1];
-        mexCallMATLAB(1, lhs, 1, &secondsArg, "seconds");
+        mexCallMATLAB(1, lhs, 6, dateArgs, "datetime");
         
-        mxDestroyArray(secondsArg);
+        for (int i = 0; i < 6; i++) {
+            mxDestroyArray(dateArgs[i]);
+        }
+        
         return lhs[0];
     }
     

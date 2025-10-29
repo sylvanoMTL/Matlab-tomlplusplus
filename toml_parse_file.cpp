@@ -153,21 +153,6 @@ mxArray* convert_array(const toml::array& arr) {
     return cell;
 }
 
-// Helper: format timezone offset as string (e.g., "+07:00" or "-05:30")
-std::string format_timezone_offset(int offset_minutes) {
-    char buffer[10];
-    int hours = offset_minutes / 60;
-    int mins = std::abs(offset_minutes % 60);
-    
-    if (offset_minutes >= 0) {
-        snprintf(buffer, sizeof(buffer), "+%02d:%02d", hours, mins);
-    } else {
-        snprintf(buffer, sizeof(buffer), "-%02d:%02d", std::abs(hours), mins);
-    }
-    
-    return std::string(buffer);
-}
-
 // Convert any TOML node to MATLAB type
 mxArray* convert_node(const toml::node& node) {
     // Handle tables
@@ -192,7 +177,7 @@ mxArray* convert_node(const toml::node& node) {
         // Access value flags from the value object itself
         auto flags = val->flags();
         
-        // Check if this integer has special formatting
+        // Check if this integer has special formatting (check in specific order)
         bool is_hex = (flags & toml::value_flags::format_as_hexadecimal) != toml::value_flags::none;
         bool is_oct = (flags & toml::value_flags::format_as_octal) != toml::value_flags::none;
         bool is_bin = (flags & toml::value_flags::format_as_binary) != toml::value_flags::none;
@@ -207,8 +192,18 @@ mxArray* convert_node(const toml::node& node) {
             *((int64_t*)mxGetData(value_field)) = int_val;
             mxSetField(result, 0, "value", value_field);
             
-            // Store the format string
-            const char* format_str = is_hex ? "hex" : (is_oct ? "oct" : "bin");
+            // Store the format string - check each format explicitly
+            const char* format_str;
+            if (is_bin) {
+                format_str = "bin";
+            } else if (is_oct) {
+                format_str = "oct";
+            } else if (is_hex) {
+                format_str = "hex";
+            } else {
+                // Shouldn't reach here, but default to hex
+                format_str = "hex";
+            }
             mxSetField(result, 0, "format", mxCreateString(format_str));
             
             return result;
@@ -278,52 +273,42 @@ mxArray* convert_node(const toml::node& node) {
         // Date-time (with or without offset)
         auto dt = val->get();
         
-        // If there's a timezone offset, create datetime with TimeZone string
+        // Create datetime(year, month, day, hour, minute, second)
+        mxArray* dateArgs[6];
+        dateArgs[0] = mxCreateDoubleScalar(dt.date.year);
+        dateArgs[1] = mxCreateDoubleScalar(dt.date.month);
+        dateArgs[2] = mxCreateDoubleScalar(dt.date.day);
+        dateArgs[3] = mxCreateDoubleScalar(dt.time.hour);
+        dateArgs[4] = mxCreateDoubleScalar(dt.time.minute);
+        dateArgs[5] = mxCreateDoubleScalar(dt.time.second + dt.time.nanosecond / 1e9);
+        
+        mxArray* lhs[1];
+        mexCallMATLAB(1, lhs, 6, dateArgs, "datetime");
+        
+        for (int i = 0; i < 6; i++) {
+            mxDestroyArray(dateArgs[i]);
+        }
+        
+        // If there's a timezone offset, store as struct with datetime and offset
         if (dt.offset.has_value()) {
             auto offset = dt.offset.value();
             int offset_minutes = offset.minutes;
             
-            // Format timezone as string (e.g., "+07:00")
-            std::string tz_str = format_timezone_offset(offset_minutes);
+            // Create the datetime without timezone first (local time)
+            const char* field_names[] = {"datetime", "offset_minutes"};
+            mxArray* result = mxCreateStructMatrix(1, 1, 2, field_names);
             
-            // Create datetime with TimeZone as string
-            mxArray* dateArgs[8];
-            dateArgs[0] = mxCreateDoubleScalar(dt.date.year);
-            dateArgs[1] = mxCreateDoubleScalar(dt.date.month);
-            dateArgs[2] = mxCreateDoubleScalar(dt.date.day);
-            dateArgs[3] = mxCreateDoubleScalar(dt.time.hour);
-            dateArgs[4] = mxCreateDoubleScalar(dt.time.minute);
-            dateArgs[5] = mxCreateDoubleScalar(dt.time.second + dt.time.nanosecond / 1e9);
-            dateArgs[6] = mxCreateString("TimeZone");
-            dateArgs[7] = mxCreateString(tz_str.c_str());
+            // Store the datetime
+            mxSetField(result, 0, "datetime", lhs[0]);
             
-            mxArray* lhs[1];
-            mexCallMATLAB(1, lhs, 8, dateArgs, "datetime");
+            // Store the offset in minutes
+            mxArray* offset_field = mxCreateDoubleScalar(offset_minutes);
+            mxSetField(result, 0, "offset_minutes", offset_field);
             
-            for (int i = 0; i < 8; i++) {
-                mxDestroyArray(dateArgs[i]);
-            }
-            
-            return lhs[0];
-        } else {
-            // No timezone - create local datetime
-            mxArray* dateArgs[6];
-            dateArgs[0] = mxCreateDoubleScalar(dt.date.year);
-            dateArgs[1] = mxCreateDoubleScalar(dt.date.month);
-            dateArgs[2] = mxCreateDoubleScalar(dt.date.day);
-            dateArgs[3] = mxCreateDoubleScalar(dt.time.hour);
-            dateArgs[4] = mxCreateDoubleScalar(dt.time.minute);
-            dateArgs[5] = mxCreateDoubleScalar(dt.time.second + dt.time.nanosecond / 1e9);
-            
-            mxArray* lhs[1];
-            mexCallMATLAB(1, lhs, 6, dateArgs, "datetime");
-            
-            for (int i = 0; i < 6; i++) {
-                mxDestroyArray(dateArgs[i]);
-            }
-            
-            return lhs[0];
+            return result;
         }
+        
+        return lhs[0];
     }
     
     // Default: empty matrix

@@ -41,27 +41,6 @@ static std::string escape_for_double_quotes(const std::string &s) {
     return out;
 }
 
-// Helper: parse timezone offset string (e.g., "+07:00", "-05:30") to offset minutes
-bool parse_timezone_offset(const char* tz_str, int& offset_minutes) {
-    if (!tz_str || strlen(tz_str) < 6) return false;
-    
-    // Check format: [+/-]HH:MM
-    if ((tz_str[0] != '+' && tz_str[0] != '-') || tz_str[3] != ':') {
-        return false;
-    }
-    
-    bool is_negative = (tz_str[0] == '-');
-    
-    // Parse hours and minutes
-    int hours = (tz_str[1] - '0') * 10 + (tz_str[2] - '0');
-    int mins = (tz_str[4] - '0') * 10 + (tz_str[5] - '0');
-    
-    offset_minutes = hours * 60 + mins;
-    if (is_negative) offset_minutes = -offset_minutes;
-    
-    return true;
-}
-
 // Convert MATLAB cell array to TOML array
 toml::array convert_cell_to_array(const mxArray* mx_cell) {
     toml::array arr;
@@ -133,8 +112,65 @@ std::unique_ptr<toml::node> convert_mx_to_node(const mxArray* mx) {
         return nullptr;
 
     // Structs are NOT converted here - they're serialized directly
-    if (mxIsStruct(mx))
+    // EXCEPT for special structs: formatted integers and offset datetimes
+    if (mxIsStruct(mx)) {
+        // Check for offset datetime struct
+        if (mxGetNumberOfFields(mx) == 2) {
+            mxArray* datetime_field = mxGetField(mx, 0, "datetime");
+            mxArray* offset_field = mxGetField(mx, 0, "offset_minutes");
+            
+            if (datetime_field && offset_field && 
+                strcmp(mxGetClassName(datetime_field), "datetime") == 0 &&
+                mxIsDouble(offset_field)) {
+                
+                // This is an offset datetime - extract components
+                mxArray* yearLhs[1], *monthLhs[1], *dayLhs[1];
+                mxArray* hourLhs[1], *minuteLhs[1], *secondLhs[1];
+                
+                mxArray* rhs[1] = {datetime_field};
+                
+                mexCallMATLAB(1, yearLhs, 1, rhs, "year");
+                mexCallMATLAB(1, monthLhs, 1, rhs, "month");
+                mexCallMATLAB(1, dayLhs, 1, rhs, "day");
+                mexCallMATLAB(1, hourLhs, 1, rhs, "hour");
+                mexCallMATLAB(1, minuteLhs, 1, rhs, "minute");
+                mexCallMATLAB(1, secondLhs, 1, rhs, "second");
+                
+                int y = (int)mxGetScalar(yearLhs[0]);
+                int m = (int)mxGetScalar(monthLhs[0]);
+                int d = (int)mxGetScalar(dayLhs[0]);
+                int h = (int)mxGetScalar(hourLhs[0]);
+                int min = (int)mxGetScalar(minuteLhs[0]);
+                double s = mxGetScalar(secondLhs[0]);
+                
+                mxDestroyArray(yearLhs[0]);
+                mxDestroyArray(monthLhs[0]);
+                mxDestroyArray(dayLhs[0]);
+                mxDestroyArray(hourLhs[0]);
+                mxDestroyArray(minuteLhs[0]);
+                mxDestroyArray(secondLhs[0]);
+                
+                int offset_minutes = (int)mxGetScalar(offset_field);
+                
+                // Create date_time with offset
+                int sec = (int)s;
+                int nanosec = (int)((s - sec) * 1e9);
+                
+                toml::date date{y, (unsigned)m, (unsigned)d};
+                toml::time time{(unsigned)h, (unsigned)min, (unsigned)sec, (unsigned)nanosec};
+                
+                int tz_hours = offset_minutes / 60;
+                int tz_minutes = offset_minutes % 60;
+                toml::time_offset offset{tz_hours, tz_minutes};
+                toml::date_time dt{date, time, offset};
+                
+                return std::make_unique<toml::value<toml::date_time>>(dt);
+            }
+        }
+        
+        // Not a special struct - return nullptr so it's handled by serialization
         return nullptr;
+    }
 
     if (mxIsCell(mx))
         return std::make_unique<toml::array>(convert_cell_to_array(mx));
@@ -151,6 +187,7 @@ std::unique_ptr<toml::node> convert_mx_to_node(const mxArray* mx) {
         // Extract datetime components using MATLAB functions
         mxArray* yearLhs[1], *monthLhs[1], *dayLhs[1];
         mxArray* hourLhs[1], *minuteLhs[1], *secondLhs[1];
+        mxArray* tzLhs[1];
         
         mxArray* rhs[1] = {const_cast<mxArray*>(mx)};
         
@@ -191,73 +228,14 @@ std::unique_ptr<toml::node> convert_mx_to_node(const mxArray* mx) {
             return std::make_unique<toml::value<toml::time>>(time);
         }
         
-        // Check for timezone by accessing the TimeZone property
-        bool has_timezone = false;
-        int offset_minutes = 0;
-        
-        // Create a struct for subsref: S.type = '.', S.subs = 'TimeZone'
-        const char* fieldNames[] = {"type", "subs"};
-        mxArray* subsStruct = mxCreateStructMatrix(1, 1, 2, fieldNames);
-        mxSetField(subsStruct, 0, "type", mxCreateString("."));
-        mxSetField(subsStruct, 0, "subs", mxCreateString("TimeZone"));
-        
-        mxArray* subsrefArgs[2];
-        subsrefArgs[0] = const_cast<mxArray*>(mx);
-        subsrefArgs[1] = subsStruct;
-        
-        mxArray* tzProp[1];
-        if (mexCallMATLAB(1, tzProp, 2, subsrefArgs, "subsref") == 0) {
-            // Check if TimeZone is not empty
-            if (!mxIsEmpty(tzProp[0])) {
-                // If it's a string (e.g., "+07:00", "UTC")
-                if (mxIsChar(tzProp[0])) {
-                    char* tz_str = mxArrayToString(tzProp[0]);
-                    if (tz_str) {
-                        // Try to parse as offset string
-                        if (parse_timezone_offset(tz_str, offset_minutes)) {
-                            has_timezone = true;
-                        } else if (strcmp(tz_str, "UTC") == 0 || strcmp(tz_str, "Z") == 0) {
-                            offset_minutes = 0;
-                            has_timezone = true;
-                        }
-                        mxFree(tz_str);
-                    }
-                }
-                // If it's a duration (backward compatibility)
-                else if (strcmp(mxGetClassName(tzProp[0]), "duration") == 0) {
-                    mxArray* hoursLhs[1];
-                    mexCallMATLAB(1, hoursLhs, 1, tzProp, "hours");
-                    
-                    double offset_hours = mxGetScalar(hoursLhs[0]);
-                    offset_minutes = (int)(offset_hours * 60);
-                    has_timezone = true;
-                    
-                    mxDestroyArray(hoursLhs[0]);
-                }
-            }
-            mxDestroyArray(tzProp[0]);
-        }
-        
-        mxDestroyArray(subsStruct);
-        
-        // Create date_time
+        // Regular datetime (local, no timezone)
         int sec = (int)s;
         int nanosec = (int)((s - sec) * 1e9);
         
         toml::date date{y, (unsigned)m, (unsigned)d};
         toml::time time{(unsigned)h, (unsigned)min, (unsigned)sec, (unsigned)nanosec};
-        
-        if (has_timezone) {
-            // time_offset constructor takes (hours, minutes) separately
-            int tz_hours = offset_minutes / 60;
-            int tz_minutes = offset_minutes % 60;
-            toml::time_offset offset{tz_hours, tz_minutes};
-            toml::date_time dt{date, time, offset};
-            return std::make_unique<toml::value<toml::date_time>>(dt);
-        } else {
-            toml::date_time dt{date, time};
-            return std::make_unique<toml::value<toml::date_time>>(dt);
-        }
+        toml::date_time dt{date, time};
+        return std::make_unique<toml::value<toml::date_time>>(dt);
     }
 
     if (mxIsLogical(mx)) {
@@ -274,28 +252,29 @@ std::unique_ptr<toml::node> convert_mx_to_node(const mxArray* mx) {
         }
     }
 
+    // Handle int64 arrays (from toml_parse_file)
     if (mxIsInt64(mx)) {
-        mwSize num = mxGetNumberOfElements(mx);
-        if (num == 1) {
-            int64_t v = *((int64_t*)mxGetData(mx));
-            return std::make_unique<toml::value<int64_t>>(v);
+        mwSize num_elements = mxGetNumberOfElements(mx);
+        if (num_elements == 1) {
+            int64_t val = *((int64_t*)mxGetData(mx));
+            return std::make_unique<toml::value<int64_t>>(val);
         } else {
             toml::array arr;
             int64_t* data = (int64_t*)mxGetData(mx);
-            for (mwSize i = 0; i < num; ++i)
+            for (mwSize i = 0; i < num_elements; ++i)
                 arr.push_back(data[i]);
             return std::make_unique<toml::array>(std::move(arr));
         }
     }
 
-    if (mxIsNumeric(mx)) {
-        mwSize num = mxGetNumberOfElements(mx);
-        if (num == 1) {
-            double v = mxGetScalar(mx);
-            if (v == std::floor(v) && v >= INT64_MIN && v <= INT64_MAX)
-                return std::make_unique<toml::value<int64_t>>(static_cast<int64_t>(v));
+    if (mxIsDouble(mx) || mxIsSingle(mx)) {
+        mwSize num_elements = mxGetNumberOfElements(mx);
+        if (num_elements == 1) {
+            double val = mxGetScalar(mx);
+            if (val == std::floor(val) && val >= INT64_MIN && val <= INT64_MAX)
+                return std::make_unique<toml::value<int64_t>>(static_cast<int64_t>(val));
             else
-                return std::make_unique<toml::value<double>>(v);
+                return std::make_unique<toml::value<double>>(val);
         } else {
             return std::make_unique<toml::array>(convert_numeric_array_to_toml(mx));
         }
@@ -304,65 +283,95 @@ std::unique_ptr<toml::node> convert_mx_to_node(const mxArray* mx) {
     return nullptr;
 }
 
-// Serialize a value to the output stream
+// Serialize a single value (non-struct) to the output stream
 void serialize_value(std::ostringstream &ss, const mxArray* mx) {
-    if (!mx || mxIsEmpty(mx)) {
-        ss << "[]";
-        return;
-    }
-
-    // Handle formatted integer structs specially
+    // Special case: formatted integer struct (from parser)
     if (mxIsStruct(mx) && mxGetNumberOfFields(mx) == 2) {
         mxArray* value_field = mxGetField(mx, 0, "value");
         mxArray* format_field = mxGetField(mx, 0, "format");
+        
         if (value_field && format_field && mxIsInt64(value_field) && mxIsChar(format_field)) {
             int64_t val = *((int64_t*)mxGetData(value_field));
-            char* fmt = mxArrayToString(format_field);
+            char* format_str = mxArrayToString(format_field);
             
-            if (strcmp(fmt, "hex") == 0) {
-                ss << "0x" << std::hex << std::uppercase << val << std::dec;
-            } else if (strcmp(fmt, "oct") == 0) {
-                ss << "0o" << std::oct << val << std::dec;
-            } else if (strcmp(fmt, "bin") == 0) {
-                ss << "0b";
-                // Print binary representation
-                bool started = false;
-                for (int i = 63; i >= 0; --i) {
-                    if (val & (1LL << i)) started = true;
-                    if (started) ss << ((val & (1LL << i)) ? '1' : '0');
+            if (format_str) {
+                std::string fmt(format_str);
+                mxFree(format_str);
+                
+                // Write in the specified format
+                if (fmt == "hex") {
+                    ss << "0x" << std::hex << std::uppercase << val << std::dec;
+                    return;
+                } else if (fmt == "oct") {
+                    ss << "0o";
+                    // Convert to octal string manually
+                    if (val == 0) {
+                        ss << "0";
+                    } else {
+                        std::string octal;
+                        int64_t v = val;
+                        // Handle negative numbers
+                        if (v < 0) {
+                            ss << "-";
+                            v = -v;
+                        }
+                        uint64_t uval = static_cast<uint64_t>(v);
+                        while (uval > 0) {
+                            octal = (char)('0' + (uval & 7)) + octal;
+                            uval >>= 3;
+                        }
+                        ss << octal;
+                    }
+                    return;
+                } else if (fmt == "bin") {
+                    ss << "0b";
+                    // Convert to binary string
+                    if (val == 0) {
+                        ss << "0";
+                    } else {
+                        std::string binary;
+                        int64_t v = val;
+                        // Handle negative numbers
+                        if (v < 0) {
+                            ss << "-";
+                            v = -v;
+                        }
+                        uint64_t uval = static_cast<uint64_t>(v);
+                        while (uval > 0) {
+                            binary = (char)('0' + (uval & 1)) + binary;
+                            uval >>= 1;
+                        }
+                        ss << binary;
+                    }
+                    return;
                 }
-                if (!started) ss << '0';
-            } else {
-                ss << val;
             }
-            
-            mxFree(fmt);
-            return;
         }
     }
-
+    
     auto node_ptr = convert_mx_to_node(mx);
     if (!node_ptr) return;
-
-    // Create a temporary table to use TOML's built-in serialization
-    toml::table tmp;
-    std::string dummy_key = "x";
     
+    // String scalar - force double quotes
     if (auto s = node_ptr->as_string()) {
-        // Force double quotes by creating a string value and serializing it
         auto *raw = static_cast<toml::value<std::string>*>(node_ptr.release());
-        std::string escaped = escape_for_double_quotes(raw->get());
-        ss << "\"" << escaped << "\"";
+        std::string v = raw->get();
         delete raw;
+        ss << "\"" << escape_for_double_quotes(v) << "\"";
         return;
     }
-    else if (auto i = node_ptr->as_integer()) {
-        auto *raw = static_cast<toml::value<int64_t>*>(node_ptr.release());
+    
+    // For other types, create temporary table and stream it, then extract the value part
+    toml::table tmp;
+    const char* dummy_key = "__tmp__";
+    
+    if (auto a = node_ptr->as_array()) {
+        toml::array* raw = static_cast<toml::array*>(node_ptr.release());
         tmp.insert_or_assign(dummy_key, std::move(*raw));
         delete raw;
     }
-    else if (auto a = node_ptr->as_array()) {
-        auto *raw = static_cast<toml::array*>(node_ptr.release());
+    else if (auto i = node_ptr->as_integer()) {
+        auto *raw = static_cast<toml::value<int64_t>*>(node_ptr.release());
         tmp.insert_or_assign(dummy_key, std::move(*raw));
         delete raw;
     }
@@ -371,23 +380,24 @@ void serialize_value(std::ostringstream &ss, const mxArray* mx) {
         double val = raw->get();
         delete raw;
         
-        // Handle special float values
-        if (std::isnan(val)) {
+        // Format float with reasonable precision
+        // Check for special values
+        if (std::isinf(val)) {
+            ss << (val > 0 ? "inf" : "-inf");
+        } else if (std::isnan(val)) {
             ss << "nan";
-        } else if (std::isinf(val)) {
-            if (val > 0) ss << "inf";
-            else ss << "-inf";
         } else {
-            // Custom float formatting to match expected output
             std::ostringstream float_ss;
             double abs_val = std::abs(val);
             
-            if (abs_val >= 1e15 || (abs_val < 1e-4 && abs_val != 0)) {
-                // Use scientific notation
-                float_ss << std::scientific << std::setprecision(8) << val;
+            // Use scientific notation for very small/large numbers
+            if (abs_val > 0 && (abs_val < 1e-4 || abs_val >= 1e10)) {
+                // Round to 12 significant figures to avoid precision artifacts
+                // This turns 9.9999999999999994e-12 into 1e-11
+                float_ss << std::scientific << std::setprecision(11) << val;
                 std::string str = float_ss.str();
                 
-                // Clean up trailing zeros in mantissa
+                // Clean up: remove unnecessary trailing zeros in mantissa
                 size_t e_pos = str.find('e');
                 if (e_pos != std::string::npos) {
                     size_t decimal_pos = str.find('.');
@@ -488,8 +498,20 @@ void serialize_struct_recursive(std::ostringstream &ss, const mxArray* mx_struct
             }
         }
         
-        // Skip structs in first pass (unless it's a formatted integer)
-        if (mxIsStruct(fv) && !is_formatted_int) continue;
+        // Special case: offset datetime struct should be treated as a value
+        bool is_offset_datetime = false;
+        if (mxIsStruct(fv) && mxGetNumberOfFields(fv) == 2) {
+            mxArray* datetime_field = mxGetField(fv, 0, "datetime");
+            mxArray* offset_field = mxGetField(fv, 0, "offset_minutes");
+            if (datetime_field && offset_field && 
+                strcmp(mxGetClassName(datetime_field), "datetime") == 0 &&
+                mxIsDouble(offset_field)) {
+                is_offset_datetime = true;
+            }
+        }
+        
+        // Skip structs in first pass (unless it's a special struct)
+        if (mxIsStruct(fv) && !is_formatted_int && !is_offset_datetime) continue;
         
         // Skip cell arrays of structs (array of tables) in first pass
         if (mxIsCell(fv)) {
@@ -521,6 +543,15 @@ void serialize_struct_recursive(std::ostringstream &ss, const mxArray* mx_struct
             mxArray* value_field = mxGetField(fv, 0, "value");
             mxArray* format_field = mxGetField(fv, 0, "format");
             if (value_field && format_field && mxIsInt64(value_field) && mxIsChar(format_field)) {
+                continue;
+            }
+            
+            // Skip offset datetime structs (they were handled in first pass)
+            mxArray* datetime_field = mxGetField(fv, 0, "datetime");
+            mxArray* offset_field = mxGetField(fv, 0, "offset_minutes");
+            if (datetime_field && offset_field && 
+                strcmp(mxGetClassName(datetime_field), "datetime") == 0 &&
+                mxIsDouble(offset_field)) {
                 continue;
             }
         }

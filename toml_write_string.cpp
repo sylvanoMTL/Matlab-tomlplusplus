@@ -15,6 +15,7 @@
 #include <cmath>
 #include <climits>
 #include <vector>
+#include <iomanip>
 
 // Forward declarations
 std::unique_ptr<toml::node> convert_mx_to_node(const mxArray* mx);
@@ -137,6 +138,21 @@ std::unique_ptr<toml::node> convert_mx_to_node(const mxArray* mx) {
         }
     }
 
+    // Handle int64 arrays (from toml_parse_file)
+    if (mxIsInt64(mx)) {
+        mwSize num_elements = mxGetNumberOfElements(mx);
+        if (num_elements == 1) {
+            int64_t val = *((int64_t*)mxGetData(mx));
+            return std::make_unique<toml::value<int64_t>>(val);
+        } else {
+            toml::array arr;
+            int64_t* data = (int64_t*)mxGetData(mx);
+            for (mwSize i = 0; i < num_elements; ++i)
+                arr.push_back(data[i]);
+            return std::make_unique<toml::array>(std::move(arr));
+        }
+    }
+
     if (mxIsDouble(mx) || mxIsSingle(mx)) {
         mwSize num_elements = mxGetNumberOfElements(mx);
         if (num_elements == 1) {
@@ -155,6 +171,46 @@ std::unique_ptr<toml::node> convert_mx_to_node(const mxArray* mx) {
 
 // Serialize a single value (non-struct) to the output stream
 void serialize_value(std::ostringstream &ss, const mxArray* mx) {
+    // Special case: formatted integer struct (from parser)
+    if (mxIsStruct(mx) && mxGetNumberOfFields(mx) == 2) {
+        mxArray* value_field = mxGetField(mx, 0, "value");
+        mxArray* format_field = mxGetField(mx, 0, "format");
+        
+        if (value_field && format_field && mxIsInt64(value_field) && mxIsChar(format_field)) {
+            int64_t val = *((int64_t*)mxGetData(value_field));
+            char* format_str = mxArrayToString(format_field);
+            
+            if (format_str) {
+                std::string fmt(format_str);
+                mxFree(format_str);
+                
+                // Write in the specified format
+                if (fmt == "hex") {
+                    ss << "0x" << std::hex << std::uppercase << val << std::dec;
+                    return;
+                } else if (fmt == "oct") {
+                    ss << "0o" << std::oct << val << std::dec;
+                    return;
+                } else if (fmt == "bin") {
+                    ss << "0b";
+                    // Convert to binary string
+                    if (val == 0) {
+                        ss << "0";
+                    } else {
+                        std::string binary;
+                        uint64_t uval = static_cast<uint64_t>(val);
+                        while (uval > 0) {
+                            binary = (char)('0' + (uval & 1)) + binary;
+                            uval >>= 1;
+                        }
+                        ss << binary;
+                    }
+                    return;
+                }
+            }
+        }
+    }
+    
     auto node_ptr = convert_mx_to_node(mx);
     if (!node_ptr) return;
     
@@ -183,8 +239,68 @@ void serialize_value(std::ostringstream &ss, const mxArray* mx) {
     }
     else if (auto f = node_ptr->as_floating_point()) {
         auto *raw = static_cast<toml::value<double>*>(node_ptr.release());
-        tmp.insert_or_assign(dummy_key, std::move(*raw));
+        double val = raw->get();
         delete raw;
+        
+        // Format float with reasonable precision
+        // Check for special values
+        if (std::isinf(val)) {
+            ss << (val > 0 ? "inf" : "-inf");
+        } else if (std::isnan(val)) {
+            ss << "nan";
+        } else {
+            std::ostringstream float_ss;
+            double abs_val = std::abs(val);
+            
+            // Use scientific notation for very small/large numbers
+            if (abs_val > 0 && (abs_val < 1e-4 || abs_val >= 1e10)) {
+                // Round to 12 significant figures to avoid precision artifacts
+                // This turns 9.9999999999999994e-12 into 1e-11
+                float_ss << std::scientific << std::setprecision(11) << val;
+                std::string str = float_ss.str();
+                
+                // Clean up: remove unnecessary trailing zeros in mantissa
+                size_t e_pos = str.find('e');
+                if (e_pos != std::string::npos) {
+                    size_t decimal_pos = str.find('.');
+                    if (decimal_pos != std::string::npos && decimal_pos < e_pos) {
+                        size_t last_nonzero = e_pos - 1;
+                        while (last_nonzero > decimal_pos && str[last_nonzero] == '0') {
+                            last_nonzero--;
+                        }
+                        if (last_nonzero == decimal_pos) {
+                            str = str.substr(0, decimal_pos) + str.substr(e_pos);
+                        } else {
+                            str = str.substr(0, last_nonzero + 1) + str.substr(e_pos);
+                        }
+                    }
+                }
+                ss << str;
+            } else if (val == std::floor(val) && abs_val < 1e15) {
+                // Integer-like value
+                float_ss << std::fixed << std::setprecision(1) << val;
+                ss << float_ss.str();
+            } else {
+                // Regular float - use reasonable precision
+                float_ss << std::setprecision(12) << val;
+                std::string str = float_ss.str();
+                
+                // Clean up trailing zeros
+                if (str.find('.') != std::string::npos) {
+                    size_t last_nonzero = str.length() - 1;
+                    while (last_nonzero > 0 && str[last_nonzero] == '0') {
+                        last_nonzero--;
+                    }
+                    if (str[last_nonzero] == '.') {
+                        str = str.substr(0, last_nonzero + 2);
+                    } else {
+                        str = str.substr(0, last_nonzero + 1);
+                    }
+                }
+                ss << str;
+            }
+        }
+        return;
     }
     else if (auto b = node_ptr->as_boolean()) {
         auto *raw = static_cast<toml::value<bool>*>(node_ptr.release());
@@ -213,14 +329,38 @@ void serialize_struct_recursive(std::ostringstream &ss, const mxArray* mx_struct
                                 const std::string& prefix) {
     int num_fields = mxGetNumberOfFields(mx_struct);
     
-    // First pass: write all non-struct fields
+    // First pass: write all non-struct, non-cell-of-structs fields
     for (int i = 0; i < num_fields; ++i) {
         const char* fname = mxGetFieldNameByNumber(mx_struct, i);
         mxArray* fv = mxGetField(mx_struct, 0, fname);
         if (!fv || mxIsEmpty(fv)) continue;
         
-        // Skip structs in first pass
-        if (mxIsStruct(fv)) continue;
+        // Special case: formatted integer struct (value + format) should be treated as a value
+        bool is_formatted_int = false;
+        if (mxIsStruct(fv) && mxGetNumberOfFields(fv) == 2) {
+            mxArray* value_field = mxGetField(fv, 0, "value");
+            mxArray* format_field = mxGetField(fv, 0, "format");
+            if (value_field && format_field && mxIsInt64(value_field) && mxIsChar(format_field)) {
+                is_formatted_int = true;
+            }
+        }
+        
+        // Skip structs in first pass (unless it's a formatted integer)
+        if (mxIsStruct(fv) && !is_formatted_int) continue;
+        
+        // Skip cell arrays of structs (array of tables) in first pass
+        if (mxIsCell(fv)) {
+            mwSize num_elements = mxGetNumberOfElements(fv);
+            bool is_array_of_structs = true;
+            for (mwSize j = 0; j < num_elements; ++j) {
+                mxArray* elem = mxGetCell(fv, j);
+                if (!elem || !mxIsStruct(elem)) {
+                    is_array_of_structs = false;
+                    break;
+                }
+            }
+            if (is_array_of_structs && num_elements > 0) continue;
+        }
         
         ss << fname << " = ";
         serialize_value(ss, fv);
@@ -233,11 +373,49 @@ void serialize_struct_recursive(std::ostringstream &ss, const mxArray* mx_struct
         mxArray* fv = mxGetField(mx_struct, 0, fname);
         if (!fv || mxIsEmpty(fv) || !mxIsStruct(fv)) continue;
         
+        // Skip formatted integer structs (they were handled in first pass)
+        if (mxGetNumberOfFields(fv) == 2) {
+            mxArray* value_field = mxGetField(fv, 0, "value");
+            mxArray* format_field = mxGetField(fv, 0, "format");
+            if (value_field && format_field && mxIsInt64(value_field) && mxIsChar(format_field)) {
+                continue;
+            }
+        }
+        
         // Build full table path
         std::string full_path = prefix.empty() ? fname : (prefix + "." + fname);
         
         ss << "\n[" << full_path << "]\n";
         serialize_struct_recursive(ss, fv, full_path);
+    }
+    
+    // Third pass: write cell arrays of structs as array of tables [[key]]
+    for (int i = 0; i < num_fields; ++i) {
+        const char* fname = mxGetFieldNameByNumber(mx_struct, i);
+        mxArray* fv = mxGetField(mx_struct, 0, fname);
+        if (!fv || mxIsEmpty(fv) || !mxIsCell(fv)) continue;
+        
+        // Check if this is a cell array of structs
+        mwSize num_elements = mxGetNumberOfElements(fv);
+        bool is_array_of_structs = true;
+        for (mwSize j = 0; j < num_elements; ++j) {
+            mxArray* elem = mxGetCell(fv, j);
+            if (!elem || !mxIsStruct(elem)) {
+                is_array_of_structs = false;
+                break;
+            }
+        }
+        
+        if (!is_array_of_structs || num_elements == 0) continue;
+        
+        // Write each struct as [[key]] section
+        std::string full_path = prefix.empty() ? fname : (prefix + "." + fname);
+        
+        for (mwSize j = 0; j < num_elements; ++j) {
+            mxArray* elem = mxGetCell(fv, j);
+            ss << "\n[[" << full_path << "]]\n";
+            serialize_struct_recursive(ss, elem, full_path);
+        }
     }
 }
 

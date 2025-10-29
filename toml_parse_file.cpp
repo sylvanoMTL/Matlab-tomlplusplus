@@ -20,15 +20,15 @@
 // Forward declaration
 mxArray* convert_node(const toml::node& node);
 
-// Structure to track field order by source position
-struct FieldWithPosition {
+// Helper structure to track field order by source position
+struct FieldInfo {
     std::string key;
     const toml::node* node;
     uint32_t line;
     uint32_t column;
     
-    // Sort by line first, then column (to preserve file order)
-    bool operator<(const FieldWithPosition& other) const {
+    // Sort by line first, then column to preserve original order
+    bool operator<(const FieldInfo& other) const {
         if (line != other.line) return line < other.line;
         return column < other.column;
     }
@@ -40,85 +40,106 @@ mxArray* convert_table(const toml::table& tbl) {
         return mxCreateStructMatrix(1, 1, 0, nullptr);
     }
     
-    // Step 1: Collect all fields with their source positions
-    std::vector<FieldWithPosition> fields;
+    // Collect all fields with their source positions
+    std::vector<FieldInfo> fields;
     fields.reserve(tbl.size());
     
-    for (const auto& [k, v] : tbl) {
-        FieldWithPosition field;
-        field.key = std::string(k);
-        field.node = &v;
+    for (auto& [k, v] : tbl) {
+        FieldInfo info;
+        info.key = std::string(k);
+        info.node = &v;
         
-        // Get source location to determine original order
+        // Get source location to preserve original order
         auto src = v.source();
         if (src.begin) {
-            field.line = src.begin.line;
-            field.column = src.begin.column;
+            info.line = src.begin.line;
+            info.column = src.begin.column;
         } else {
-            // If no source info (shouldn't happen for parsed files),
-            // use maximum values so they sort to the end
-            field.line = UINT32_MAX;
-            field.column = UINT32_MAX;
+            // If no source info (e.g., programmatically created), 
+            // use max values (will sort to end)
+            info.line = UINT32_MAX;
+            info.column = UINT32_MAX;
         }
         
-        fields.push_back(field);
+        fields.push_back(info);
     }
     
-    // Step 2: Sort by source position to restore original file order
+    // Sort by source position to restore original order
     std::sort(fields.begin(), fields.end());
     
-    // Step 3: Create field names array in the correct order
+    // Create field names array in correct order
     std::vector<const char*> field_names;
     field_names.reserve(fields.size());
     for (const auto& field : fields) {
         field_names.push_back(field.key.c_str());
     }
     
-    // Step 4: Create MATLAB struct with ordered fields
+    // Create MATLAB struct with ordered fields
     mxArray* matlab_struct = mxCreateStructMatrix(
         1, 1,  // 1x1 struct
         static_cast<int>(field_names.size()),
         field_names.data()
     );
     
-    // Step 5: Populate struct fields in order
+    // Populate struct fields in the correct order
     for (size_t i = 0; i < fields.size(); ++i) {
-        mxSetFieldByNumber(matlab_struct, 0, static_cast<int>(i), 
-                          convert_node(*fields[i].node));
+        mxSetFieldByNumber(matlab_struct, 0, i, convert_node(*fields[i].node));
     }
     
     return matlab_struct;
 }
 
-// Convert TOML array to MATLAB cell array or numeric array
+// Convert TOML array to MATLAB array (typed for homogeneous data)
 mxArray* convert_array(const toml::array& arr) {
     if (arr.empty()) {
         return mxCreateCellMatrix(1, 0);
     }
     
-    // Check if array is homogeneous and numeric
+    // Check if array is homogeneous
     bool all_integers = true;
     bool all_floats = true;
+    bool all_bools = true;
     
     for (const auto& elem : arr) {
         if (!elem.is_integer()) all_integers = false;
         if (!elem.is_floating_point()) all_floats = false;
+        if (!elem.is_boolean()) all_bools = false;
     }
     
-    // Create numeric array for homogeneous numeric data
-    if (all_integers || all_floats) {
-        mxArray* numeric_array = mxCreateDoubleMatrix(1, arr.size(), mxREAL);
-        double* data = mxGetPr(numeric_array);
+    // Create int64 array for integer arrays
+    if (all_integers) {
+        mxArray* int_array = mxCreateNumericMatrix(1, arr.size(), mxINT64_CLASS, mxREAL);
+        int64_t* data = (int64_t*)mxGetData(int_array);
         
         for (size_t i = 0; i < arr.size(); ++i) {
-            if (all_integers) {
-                data[i] = static_cast<double>(arr[i].value_or<int64_t>(0));
-            } else {
-                data[i] = arr[i].value_or<double>(0.0);
-            }
+            data[i] = arr[i].value_or<int64_t>(0);
         }
         
-        return numeric_array;
+        return int_array;
+    }
+    
+    // Create double array for float arrays
+    if (all_floats) {
+        mxArray* float_array = mxCreateDoubleMatrix(1, arr.size(), mxREAL);
+        double* data = mxGetPr(float_array);
+        
+        for (size_t i = 0; i < arr.size(); ++i) {
+            data[i] = arr[i].value_or<double>(0.0);
+        }
+        
+        return float_array;
+    }
+    
+    // Create logical array for boolean arrays
+    if (all_bools) {
+        mxArray* bool_array = mxCreateLogicalMatrix(1, arr.size());
+        mxLogical* data = mxGetLogicals(bool_array);
+        
+        for (size_t i = 0; i < arr.size(); ++i) {
+            data[i] = arr[i].value_or<bool>(false);
+        }
+        
+        return bool_array;
     }
     
     // Otherwise use cell array for heterogeneous data
@@ -133,7 +154,7 @@ mxArray* convert_array(const toml::array& arr) {
 
 // Convert any TOML node to MATLAB type
 mxArray* convert_node(const toml::node& node) {
-    // Handle tables (nested structs)
+    // Handle tables
     if (auto tbl = node.as_table()) {
         return convert_table(*tbl);
     }
@@ -148,9 +169,39 @@ mxArray* convert_node(const toml::node& node) {
         return mxCreateString(val->get().c_str());
     }
     
-    // Handle integer values
+    // Handle integer values - check for special formatting (hex, octal, binary)
     if (auto val = node.as_integer()) {
-        return mxCreateDoubleScalar(static_cast<double>(val->get()));
+        int64_t int_val = val->get();
+        
+        // Access value flags from the value object itself
+        auto flags = val->flags();
+        
+        // Check if this integer has special formatting
+        bool is_hex = (flags & toml::value_flags::format_as_hexadecimal) != toml::value_flags::none;
+        bool is_oct = (flags & toml::value_flags::format_as_octal) != toml::value_flags::none;
+        bool is_bin = (flags & toml::value_flags::format_as_binary) != toml::value_flags::none;
+        
+        // If it has special formatting, store as struct with format info
+        if (is_hex || is_oct || is_bin) {
+            const char* field_names[] = {"value", "format"};
+            mxArray* result = mxCreateStructMatrix(1, 1, 2, field_names);
+            
+            // Store the numeric value
+            mxArray* value_field = mxCreateNumericMatrix(1, 1, mxINT64_CLASS, mxREAL);
+            *((int64_t*)mxGetData(value_field)) = int_val;
+            mxSetField(result, 0, "value", value_field);
+            
+            // Store the format string
+            const char* format_str = is_hex ? "hex" : (is_oct ? "oct" : "bin");
+            mxSetField(result, 0, "format", mxCreateString(format_str));
+            
+            return result;
+        }
+        
+        // Regular integer without special formatting
+        mxArray* result = mxCreateNumericMatrix(1, 1, mxINT64_CLASS, mxREAL);
+        *((int64_t*)mxGetData(result)) = int_val;
+        return result;
     }
     
     // Handle floating point values

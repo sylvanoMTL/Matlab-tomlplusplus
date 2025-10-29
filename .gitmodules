@@ -1,0 +1,6 @@
+[submodule "tomlplusplus"]
+	path = tomlplusplus
+	url = https://github.com/marzer/tomlplusplus.git
+[submodule "matlab-toml"]
+	path = matlab-toml
+	url = https://github.com/g-s-k/matlab-toml.git

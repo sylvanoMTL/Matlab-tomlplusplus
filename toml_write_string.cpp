@@ -16,6 +16,7 @@
 #include <climits>
 #include <vector>
 #include <iomanip>
+#include <cstring>
 
 // Forward declarations
 std::unique_ptr<toml::node> convert_mx_to_node(const mxArray* mx);
@@ -122,6 +123,92 @@ std::unique_ptr<toml::node> convert_mx_to_node(const mxArray* mx) {
         std::string result(str ? str : "");
         if (str) mxFree(str);
         return std::make_unique<toml::value<std::string>>(result);
+    }
+    
+    // Handle MATLAB datetime objects
+    if (strcmp(mxGetClassName(mx), "datetime") == 0) {
+        // Extract datetime components using MATLAB functions
+        mxArray* yearLhs[1], *monthLhs[1], *dayLhs[1];
+        mxArray* hourLhs[1], *minuteLhs[1], *secondLhs[1];
+        mxArray* tzLhs[1];
+        
+        mxArray* rhs[1] = {const_cast<mxArray*>(mx)};
+        
+        mexCallMATLAB(1, yearLhs, 1, rhs, "year");
+        mexCallMATLAB(1, monthLhs, 1, rhs, "month");
+        mexCallMATLAB(1, dayLhs, 1, rhs, "day");
+        mexCallMATLAB(1, hourLhs, 1, rhs, "hour");
+        mexCallMATLAB(1, minuteLhs, 1, rhs, "minute");
+        mexCallMATLAB(1, secondLhs, 1, rhs, "second");
+        
+        int y = (int)mxGetScalar(yearLhs[0]);
+        int m = (int)mxGetScalar(monthLhs[0]);
+        int d = (int)mxGetScalar(dayLhs[0]);
+        int h = (int)mxGetScalar(hourLhs[0]);
+        int min = (int)mxGetScalar(minuteLhs[0]);
+        double s = mxGetScalar(secondLhs[0]);
+        
+        mxDestroyArray(yearLhs[0]);
+        mxDestroyArray(monthLhs[0]);
+        mxDestroyArray(dayLhs[0]);
+        mxDestroyArray(hourLhs[0]);
+        mxDestroyArray(minuteLhs[0]);
+        mxDestroyArray(secondLhs[0]);
+        
+        // Check if it's date-only (all time components are 0)
+        if (h == 0 && min == 0 && s == 0.0) {
+            // Date only
+            toml::date date{y, (unsigned)m, (unsigned)d};
+            return std::make_unique<toml::value<toml::date>>(date);
+        }
+        
+        // Check for timezone - datetime objects store timezone info
+        // Try to detect if timezone exists by checking if datetime is zoned
+        bool has_timezone = false;
+        int offset_minutes = 0;
+        
+        // For simplicity, assume local datetime (no timezone) by default
+        // Users can manually set timezone in MATLAB if needed before writing
+        // To properly detect: would need complex property access which varies by MATLAB version
+        
+        // Create date_time
+        int sec = (int)s;
+        int nanosec = (int)((s - sec) * 1e9);
+        
+        toml::date date{y, (unsigned)m, (unsigned)d};
+        toml::time time{(unsigned)h, (unsigned)min, (unsigned)sec, (unsigned)nanosec};
+        
+        if (has_timezone) {
+            // time_offset constructor takes (hours, minutes) separately
+            int tz_hours = offset_minutes / 60;
+            int tz_minutes = offset_minutes % 60;
+            toml::time_offset offset{tz_hours, tz_minutes};
+            toml::date_time dt{date, time, offset};
+            return std::make_unique<toml::value<toml::date_time>>(dt);
+        } else {
+            toml::date_time dt{date, time};
+            return std::make_unique<toml::value<toml::date_time>>(dt);
+        }
+    }
+    
+    // Handle MATLAB duration objects
+    if (strcmp(mxGetClassName(mx), "duration") == 0) {
+        // Convert duration to seconds
+        mxArray* secondsLhs[1];
+        mxArray* rhs[1] = {const_cast<mxArray*>(mx)};
+        mexCallMATLAB(1, secondsLhs, 1, rhs, "seconds");
+        
+        double total_seconds = mxGetScalar(secondsLhs[0]);
+        mxDestroyArray(secondsLhs[0]);
+        
+        int hours = (int)(total_seconds / 3600);
+        int minutes = (int)((total_seconds - hours * 3600) / 60);
+        double secs = total_seconds - hours * 3600 - minutes * 60;
+        int sec = (int)secs;
+        int nanosec = (int)((secs - sec) * 1e9);
+        
+        toml::time time{(unsigned)hours, (unsigned)minutes, (unsigned)sec, (unsigned)nanosec};
+        return std::make_unique<toml::value<toml::time>>(time);
     }
 
     if (mxIsLogical(mx)) {
@@ -304,6 +391,21 @@ void serialize_value(std::ostringstream &ss, const mxArray* mx) {
     }
     else if (auto b = node_ptr->as_boolean()) {
         auto *raw = static_cast<toml::value<bool>*>(node_ptr.release());
+        tmp.insert_or_assign(dummy_key, std::move(*raw));
+        delete raw;
+    }
+    else if (auto d = node_ptr->as_date()) {
+        auto *raw = static_cast<toml::value<toml::date>*>(node_ptr.release());
+        tmp.insert_or_assign(dummy_key, std::move(*raw));
+        delete raw;
+    }
+    else if (auto t = node_ptr->as_time()) {
+        auto *raw = static_cast<toml::value<toml::time>*>(node_ptr.release());
+        tmp.insert_or_assign(dummy_key, std::move(*raw));
+        delete raw;
+    }
+    else if (auto dt = node_ptr->as_date_time()) {
+        auto *raw = static_cast<toml::value<toml::date_time>*>(node_ptr.release());
         tmp.insert_or_assign(dummy_key, std::move(*raw));
         delete raw;
     }

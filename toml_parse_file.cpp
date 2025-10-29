@@ -16,6 +16,7 @@
 #include <vector>
 #include <sstream>
 #include <algorithm>
+#include <cstring>
 
 // Forward declaration
 mxArray* convert_node(const toml::node& node);
@@ -214,21 +215,98 @@ mxArray* convert_node(const toml::node& node) {
         return mxCreateLogicalScalar(val->get());
     }
     
-    // Handle date/time types (convert to string)
+    // Handle date/time types
     if (auto val = node.as_date()) {
-        std::stringstream ss;
-        ss << val->get();
-        return mxCreateString(ss.str().c_str());
+        // Local date only - create datetime with just the date
+        auto d = val->get();
+        
+        // Create MATLAB datetime: datetime(year, month, day)
+        mxArray* dateArgs[3];
+        dateArgs[0] = mxCreateDoubleScalar(d.year);
+        dateArgs[1] = mxCreateDoubleScalar(d.month);
+        dateArgs[2] = mxCreateDoubleScalar(d.day);
+        
+        mxArray* lhs[1];
+        mexCallMATLAB(1, lhs, 3, dateArgs, "datetime");
+        
+        mxDestroyArray(dateArgs[0]);
+        mxDestroyArray(dateArgs[1]);
+        mxDestroyArray(dateArgs[2]);
+        
+        return lhs[0];
     }
+    
     if (auto val = node.as_time()) {
-        std::stringstream ss;
-        ss << val->get();
-        return mxCreateString(ss.str().c_str());
+        // Local time only - create duration
+        auto t = val->get();
+        
+        // Create MATLAB duration: hours(h) + minutes(m) + seconds(s)
+        double total_seconds = t.hour * 3600.0 + t.minute * 60.0 + t.second + t.nanosecond / 1e9;
+        
+        mxArray* secondsArg = mxCreateDoubleScalar(total_seconds);
+        mxArray* lhs[1];
+        mexCallMATLAB(1, lhs, 1, &secondsArg, "seconds");
+        
+        mxDestroyArray(secondsArg);
+        return lhs[0];
     }
+    
     if (auto val = node.as_date_time()) {
-        std::stringstream ss;
-        ss << val->get();
-        return mxCreateString(ss.str().c_str());
+        // Date-time (with or without offset)
+        auto dt = val->get();
+        
+        // Create datetime(year, month, day, hour, minute, second)
+        mxArray* dateArgs[6];
+        dateArgs[0] = mxCreateDoubleScalar(dt.date.year);
+        dateArgs[1] = mxCreateDoubleScalar(dt.date.month);
+        dateArgs[2] = mxCreateDoubleScalar(dt.date.day);
+        dateArgs[3] = mxCreateDoubleScalar(dt.time.hour);
+        dateArgs[4] = mxCreateDoubleScalar(dt.time.minute);
+        dateArgs[5] = mxCreateDoubleScalar(dt.time.second + dt.time.nanosecond / 1e9);
+        
+        mxArray* lhs[1];
+        mexCallMATLAB(1, lhs, 6, dateArgs, "datetime");
+        
+        for (int i = 0; i < 6; i++) {
+            mxDestroyArray(dateArgs[i]);
+        }
+        
+        // If there's a timezone offset, create datetime with TimeZone
+        if (dt.offset.has_value()) {
+            auto offset = dt.offset.value();
+            int offset_minutes = offset.minutes;
+            
+            // Create datetime with TimeZone parameter
+            mxArray* dateArgs[8];
+            dateArgs[0] = mxCreateDoubleScalar(dt.date.year);
+            dateArgs[1] = mxCreateDoubleScalar(dt.date.month);
+            dateArgs[2] = mxCreateDoubleScalar(dt.date.day);
+            dateArgs[3] = mxCreateDoubleScalar(dt.time.hour);
+            dateArgs[4] = mxCreateDoubleScalar(dt.time.minute);
+            dateArgs[5] = mxCreateDoubleScalar(dt.time.second + dt.time.nanosecond / 1e9);
+            dateArgs[6] = mxCreateString("TimeZone");
+            
+            // Format timezone as "+HH:MM" or "UTC"
+            char tz_str[10];
+            if (offset_minutes == 0) {
+                strcpy(tz_str, "UTC");
+            } else {
+                int hours = offset_minutes / 60;
+                int mins = abs(offset_minutes % 60);
+                snprintf(tz_str, sizeof(tz_str), "%+03d:%02d", hours, mins);
+            }
+            dateArgs[7] = mxCreateString(tz_str);
+            
+            mexCallMATLAB(1, lhs, 8, dateArgs, "datetime");
+            
+            for (int i = 0; i < 8; i++) {
+                mxDestroyArray(dateArgs[i]);
+            }
+            
+            return lhs[0];
+        }
+        
+        return lhs[0];
     }
     
     // Default: empty matrix

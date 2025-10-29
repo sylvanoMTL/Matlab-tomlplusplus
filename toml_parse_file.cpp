@@ -153,6 +153,21 @@ mxArray* convert_array(const toml::array& arr) {
     return cell;
 }
 
+// Helper: format timezone offset as string (e.g., "+07:00" or "-05:30")
+std::string format_timezone_offset(int offset_minutes) {
+    char buffer[10];
+    int hours = offset_minutes / 60;
+    int mins = std::abs(offset_minutes % 60);
+    
+    if (offset_minutes >= 0) {
+        snprintf(buffer, sizeof(buffer), "+%02d:%02d", hours, mins);
+    } else {
+        snprintf(buffer, sizeof(buffer), "-%02d:%02d", std::abs(hours), mins);
+    }
+    
+    return std::string(buffer);
+}
+
 // Convert any TOML node to MATLAB type
 mxArray* convert_node(const toml::node& node) {
     // Handle tables
@@ -263,28 +278,15 @@ mxArray* convert_node(const toml::node& node) {
         // Date-time (with or without offset)
         auto dt = val->get();
         
-        // Create datetime(year, month, day, hour, minute, second)
-        mxArray* dateArgs[6];
-        dateArgs[0] = mxCreateDoubleScalar(dt.date.year);
-        dateArgs[1] = mxCreateDoubleScalar(dt.date.month);
-        dateArgs[2] = mxCreateDoubleScalar(dt.date.day);
-        dateArgs[3] = mxCreateDoubleScalar(dt.time.hour);
-        dateArgs[4] = mxCreateDoubleScalar(dt.time.minute);
-        dateArgs[5] = mxCreateDoubleScalar(dt.time.second + dt.time.nanosecond / 1e9);
-        
-        mxArray* lhs[1];
-        mexCallMATLAB(1, lhs, 6, dateArgs, "datetime");
-        
-        for (int i = 0; i < 6; i++) {
-            mxDestroyArray(dateArgs[i]);
-        }
-        
-        // If there's a timezone offset, create datetime with TimeZone
+        // If there's a timezone offset, create datetime with TimeZone string
         if (dt.offset.has_value()) {
             auto offset = dt.offset.value();
             int offset_minutes = offset.minutes;
             
-            // Create datetime with TimeZone parameter
+            // Format timezone as string (e.g., "+07:00")
+            std::string tz_str = format_timezone_offset(offset_minutes);
+            
+            // Create datetime with TimeZone as string
             mxArray* dateArgs[8];
             dateArgs[0] = mxCreateDoubleScalar(dt.date.year);
             dateArgs[1] = mxCreateDoubleScalar(dt.date.month);
@@ -293,18 +295,9 @@ mxArray* convert_node(const toml::node& node) {
             dateArgs[4] = mxCreateDoubleScalar(dt.time.minute);
             dateArgs[5] = mxCreateDoubleScalar(dt.time.second + dt.time.nanosecond / 1e9);
             dateArgs[6] = mxCreateString("TimeZone");
+            dateArgs[7] = mxCreateString(tz_str.c_str());
             
-            // Format timezone as "+HH:MM" or "UTC"
-            char tz_str[10];
-            if (offset_minutes == 0) {
-                strcpy(tz_str, "UTC");
-            } else {
-                int hours = offset_minutes / 60;
-                int mins = abs(offset_minutes % 60);
-                snprintf(tz_str, sizeof(tz_str), "%+03d:%02d", hours, mins);
-            }
-            dateArgs[7] = mxCreateString(tz_str);
-            
+            mxArray* lhs[1];
             mexCallMATLAB(1, lhs, 8, dateArgs, "datetime");
             
             for (int i = 0; i < 8; i++) {
@@ -312,9 +305,25 @@ mxArray* convert_node(const toml::node& node) {
             }
             
             return lhs[0];
+        } else {
+            // No timezone - create local datetime
+            mxArray* dateArgs[6];
+            dateArgs[0] = mxCreateDoubleScalar(dt.date.year);
+            dateArgs[1] = mxCreateDoubleScalar(dt.date.month);
+            dateArgs[2] = mxCreateDoubleScalar(dt.date.day);
+            dateArgs[3] = mxCreateDoubleScalar(dt.time.hour);
+            dateArgs[4] = mxCreateDoubleScalar(dt.time.minute);
+            dateArgs[5] = mxCreateDoubleScalar(dt.time.second + dt.time.nanosecond / 1e9);
+            
+            mxArray* lhs[1];
+            mexCallMATLAB(1, lhs, 6, dateArgs, "datetime");
+            
+            for (int i = 0; i < 6; i++) {
+                mxDestroyArray(dateArgs[i]);
+            }
+            
+            return lhs[0];
         }
-        
-        return lhs[0];
     }
     
     // Default: empty matrix

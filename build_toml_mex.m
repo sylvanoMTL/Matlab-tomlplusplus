@@ -1,5 +1,5 @@
 function build_toml_mex()
-    clear all
+    clear all;clc;
         mex('toml_write_string.cpp', ...
         '-I"C:\Git_Repo\TOML_MatlabMex\tomlplusplus\include"', ...
         'CXXFLAGS="$CXXFLAGS -std=c++17"');

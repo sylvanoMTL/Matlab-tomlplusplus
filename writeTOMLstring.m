@@ -1,4 +1,4 @@
-function toml_string = writeTOMLstring()
+function toml_string = writeTOMLstring(data)
     % WRITETOMLSTRING Write MATLAB struct to TOML string with error handling
     %
     % Syntax:
@@ -29,8 +29,9 @@ function toml_string = writeTOMLstring()
     % Initialize output
     success = false;
     
+    nargin
     % Validate inputs
-    if nargin < 1
+    if nargin ~= 1
         error('writeTOMLstrong:missingInput', ...
               'One input required: writeTOMLstring(data)');
     end

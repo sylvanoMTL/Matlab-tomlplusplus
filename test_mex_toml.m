@@ -19,6 +19,7 @@ parsed_toml_string = toml_parse_string(string_to_parse);
 
 %% write a TOML string
 % Create a MATLAB struct
+clear all,clc
 config.name = 'MyApp';
 config.version = 1.5;
 config.debug = true;

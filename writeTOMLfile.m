@@ -5,7 +5,7 @@ function success = writeTOMLfile(tomlfile, data)
     %   success = writeTOMLfile(tomlfile, data)
     %
     % Description:
-    %   Wrapper for toml_write_string with robust error handling and validation
+    %   Wrapper for toml_write_file with robust error handling and validation
     %
     % Inputs:
     %   tomlfile - Output file path (string or char)
@@ -83,8 +83,8 @@ function success = writeTOMLfile(tomlfile, data)
                     tomlfile, ME.message);
         elseif contains(ME.identifier, 'mexNotFound') || contains(ME.message, 'Undefined')
             warning('writeTOMLfile:mexNotCompiled', ...
-                    'toml_write_string MEX function not found. Please compile it first:\n%s', ...
-                    'mex -R2018a CXXFLAGS="$CXXFLAGS -std=c++17" -I/path/to/tomlplusplus/include toml_write_string.cpp');
+                    'toml_write_file MEX function not found. Please compile it first:\n%s', ...
+                    'mex -R2018a CXXFLAGS="$CXXFLAGS -std=c++17" -I/path/to/tomlplusplus/include toml_write_file.cpp');
         else
             warning('writeTOMLfile:unknownError', ...
                     'Unexpected error writing TOML file: %s\nError: %s', ...

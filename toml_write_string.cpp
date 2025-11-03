@@ -352,12 +352,21 @@ void serialize_value(std::ostringstream &ss, const mxArray* mx) {
     auto node_ptr = convert_mx_to_node(mx);
     if (!node_ptr) return;
     
-    // String scalar - force double quotes
+    // String scalar - check for newlines and use appropriate format
     if (auto s = node_ptr->as_string()) {
         auto *raw = static_cast<toml::value<std::string>*>(node_ptr.release());
         std::string v = raw->get();
         delete raw;
-        ss << "\"" << escape_for_double_quotes(v) << "\"";
+        
+        // Check if string contains newlines
+        if (v.find('\n') != std::string::npos) {
+            // Multi-line string - use triple quotes
+            // Output content exactly as-is (don't add trailing newline)
+            ss << "\"\"\"\n" << v << "\"\"\"";
+        } else {
+            // Single-line string - use double quotes with escaping
+            ss << "\"" << escape_for_double_quotes(v) << "\"";
+        }
         return;
     }
     

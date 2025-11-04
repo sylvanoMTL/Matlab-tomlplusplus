@@ -63,7 +63,7 @@ function parsedStructure = parseTOMLstring(tomlstring)
             warning('parseTOMLstring:parseError', ...
                     'Failed to parse TOML string.\nError: %s', ME.message);
         elseif contains(ME.identifier, 'mexNotFound') || contains(ME.message, 'Undefined')
-            warning('parseTOMLstring:mexNotCompiled', ...
+            error('parseTOMLstring:mexNotCompiled', ...
                     'toml_parse_string MEX function not found. Please compile it first:\n%s', ...
                     'mex -R2018a CXXFLAGS="$CXXFLAGS -std=c++17" -I/path/to/tomlplusplus/include toml_parse_string.cpp');
         else
@@ -73,5 +73,7 @@ function parsedStructure = parseTOMLstring(tomlstring)
         
         % Return empty struct on error
         parsedStructure = struct();
+
+        % rethrow(ME)
     end
 end

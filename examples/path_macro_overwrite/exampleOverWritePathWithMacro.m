@@ -11,7 +11,7 @@ path = '${HOME}\Documents\${PROJECT}\data';
 expandedPath = expandPath(path, macros)
 
 %% example pulling information from toml file
-macros = struct('DATA_ROOT', preferences.macros.DATA_ROOT); % , 'PROJECT', 'MyProject');
+macros = struct('DATA_ROOT', preferences.macros.DATA_ROOT);     % , 'PROJECT', 'MyProject');
 path = '${DATA_ROOT}\Documents\data';
 expandedPath = expandPath(path, macros)
 

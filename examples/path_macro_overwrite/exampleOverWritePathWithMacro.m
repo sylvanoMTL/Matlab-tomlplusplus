@@ -34,5 +34,5 @@ end
 preferenceFile = fullfile(pwd,'examples/path_macro_overwrite/preferences.toml')
 preferences = parseTOMLfile(preferenceFile)
 macros = struct('DATA_ROOT', preferences.macros.DATA_ROOT); 
-path = '${DATA_ROOT}\Documents\data';
+path = '${DATA_ROOT}/Documents/data';
 expandedPath = expandPath(path, macros)

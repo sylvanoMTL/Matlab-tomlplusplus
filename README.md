@@ -18,13 +18,13 @@ If it fails, ensure you have MEX compiler capability installed on your machine.
 
 ```matlab
 toml_str = 'title = "Example"' + newline + 'count = 42';
-data = toml_parse_string(toml_str);
+data = parseTOMLstring(toml_str);
 ```
 
 ### Parse a TOML file
 
 ```matlab
-data = toml_parse('config.toml');
+data = parseTOMLfile('config.toml');
 title = data.title;
 port = data.server.port;
 ```
@@ -33,22 +33,22 @@ port = data.server.port;
 
 ```matlab
 data = struct('title', 'My App', 'version', '1.0');
-toml_str = toml_write_string(data);
+toml_str = writeTOMLstring(data);
 ```
 
 ### Write a TOML file
 
 ```matlab
 data = struct('database', struct('host', 'localhost', 'port', 5432));
-toml_write('config.toml', data);
+writeTOMLfile('config.toml', data);
 ```
 
 ### Update a TOML file (preserve formatting)
 
 ```matlab
-data = toml_parse('config.toml');
+data = parseTOMLfile('config.toml');
 data.server.port = 8080;
-toml_update('config.toml', data);  % Comments and formatting preserved
+updateTOMLfile('config.toml', data);  % Comments and formatting preserved
 ```
 
 See the [examples](examples/) folder for more usage examples.

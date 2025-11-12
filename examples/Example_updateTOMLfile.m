@@ -50,7 +50,7 @@ type('config.toml');
 fprintf('\n=== Example 1: Modify top-level values ===\n');
 
 % Parse original
-config = toml_parse_file('config.toml');
+config = parseTOMLfile('config.toml');
 fprintf('Original title: %s\n', config.title);
 fprintf('Original version: %s\n', config.version);
 
@@ -62,7 +62,7 @@ mods.version = "2.0.0";
 updateTOMLfile('config.toml', mods);
 
 % Verify
-config = toml_parse_file('config.toml');
+config = parseTOMLfile('config.toml');
 fprintf('\nUpdated title: %s\n', config.title);
 fprintf('Updated version: %s\n', config.version);
 fprintf('✓ Top-level values modified, comments preserved!\n');
@@ -81,7 +81,7 @@ mods.database.enabled = false;
 
 updateTOMLfile('config.toml', mods);
 
-config = toml_parse_file('config.toml');
+config = parseTOMLfile('config.toml');
 fprintf('\nUpdated database.server: %s\n', config.database.server);
 fprintf('Updated database.connection_max: %d\n', config.database.connection_max);
 fprintf('Updated database.enabled: %d\n', config.database.enabled);
@@ -101,7 +101,7 @@ mods.servers.beta.ip = "10.0.0.20";
 
 updateTOMLfile('config.toml', mods);
 
-config = toml_parse_file('config.toml');
+config = parseTOMLfile('config.toml');
 fprintf('\nUpdated servers.alpha.ip: %s\n', config.servers.alpha.ip);
 fprintf('Updated servers.alpha.dc: %s\n', config.servers.alpha.dc);
 fprintf('Updated servers.beta.ip: %s\n', config.servers.beta.ip);
@@ -120,7 +120,7 @@ mods.database.ports = [8001, 8002, 8003, 8004];
 
 updateTOMLfile('config.toml', mods);
 
-config = toml_parse_file('config.toml');
+config = parseTOMLfile('config.toml');
 fprintf('Updated database.ports: [');
 fprintf(' %d', config.database.ports);
 fprintf(' ]\n');
@@ -141,7 +141,7 @@ mods.servers.beta.binary_flag = struct('value', 42, 'format', 'bin');
 
 updateTOMLfile('config.toml', mods);
 
-config = toml_parse_file('config.toml');
+config = parseTOMLfile('config.toml');
 fprintf('\nUpdated hex_color: 0x%X\n', config.servers.beta.hex_color.value);
 fprintf('Updated octal_perm: 0o%s\n', dec2base(config.servers.beta.octal_perm.value, 8));
 fprintf('Updated binary_flag: 0b%s\n', dec2bin(config.servers.beta.binary_flag.value));
@@ -160,7 +160,7 @@ mods.database.ports = [9001, 9002];
 
 updateTOMLfile('config.toml', mods);
 
-config = toml_parse_file('config.toml');
+config = parseTOMLfile('config.toml');
 fprintf('Modified multiple fields across different nesting levels\n');
 fprintf('  title: %s\n', config.title);
 fprintf('  network.timeout: %d\n', config.network.timeout);

@@ -113,7 +113,7 @@ config = parseTOMLstring(original_str);
 
 % Write it back
 if ~isempty(fieldnames(config))
-    new_str = toml_write_string(config);
+    new_str = writeTOMLstring(config);
     fprintf('\nRound-trip TOML:\n%s\n', new_str);
     
     % Parse again to verify

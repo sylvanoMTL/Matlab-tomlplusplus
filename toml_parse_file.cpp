@@ -8,6 +8,7 @@
  *
  * Usage in MATLAB:
  *   data = toml_parse_file('config.toml');
+ *   data = toml_parse_file("config.toml");  % Also accepts string objects
  */
 
 #include "mex.h"
@@ -84,7 +85,7 @@ mxArray* convert_table(const toml::table& tbl) {
     
     // Populate struct fields in the correct order
     for (size_t i = 0; i < fields.size(); ++i) {
-        mxSetFieldByNumber(matlab_struct, 0, i, convert_node(*fields[i].node));
+        mxSetFieldByNumber(matlab_struct, 0, static_cast<int>(i), convert_node(*fields[i].node));
     }
     
     return matlab_struct;
@@ -147,7 +148,7 @@ mxArray* convert_array(const toml::array& arr) {
     mxArray* cell = mxCreateCellMatrix(1, arr.size());
     
     for (size_t i = 0; i < arr.size(); ++i) {
-        mxSetCell(cell, i, convert_node(arr[i]));
+        mxSetCell(cell, static_cast<mwIndex>(i), convert_node(arr[i]));
     }
     
     return cell;
@@ -315,6 +316,59 @@ mxArray* convert_node(const toml::node& node) {
     return mxCreateDoubleMatrix(0, 0, mxREAL);
 }
 
+// Helper function to extract string from MATLAB string object or char array
+std::string extractMatlabString(const mxArray* mx) {
+    // Handle char arrays
+    if (mxIsChar(mx)) {
+        char* str = mxArrayToString(mx);
+        if (!str) {
+            mexErrMsgIdAndTxt("toml_parse_file:invalidInput", 
+                              "Could not convert char array to string");
+        }
+        std::string result(str);
+        mxFree(str);
+        return result;
+    }
+    
+    // Handle string objects
+    const char* class_name = mxGetClassName(mx);
+    if (class_name && strcmp(class_name, "string") == 0) {
+        // For string objects, we need to handle them differently
+        // String objects in MATLAB are arrays, get the first element
+        if (mxGetNumberOfElements(mx) == 0) {
+            mexErrMsgIdAndTxt("toml_parse_file:emptyString", 
+                              "Input string is empty");
+        }
+        
+        if (mxGetNumberOfElements(mx) > 1) {
+            mexErrMsgIdAndTxt("toml_parse_file:arrayInput", 
+                              "Input must be a single string, not a string array");
+        }
+        
+        // Call MATLAB's char() function to convert string to char array
+        mxArray* lhs[1];
+        mxArray* rhs[1] = {const_cast<mxArray*>(mx)};
+        mexCallMATLAB(1, lhs, 1, rhs, "char");
+        
+        // Now extract the char array
+        char* str = mxArrayToString(lhs[0]);
+        if (!str) {
+            mxDestroyArray(lhs[0]);
+            mexErrMsgIdAndTxt("toml_parse_file:conversionError", 
+                              "Could not convert string object to char array");
+        }
+        
+        std::string result(str);
+        mxFree(str);
+        mxDestroyArray(lhs[0]);
+        return result;
+    }
+    
+    mexErrMsgIdAndTxt("toml_parse_file:invalidInput", 
+                      "Input must be a string or char array");
+    return ""; // Never reached
+}
+
 // MEX entry point
 void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[]) {
     // Check arguments
@@ -323,16 +377,14 @@ void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[]) {
                           "Usage: data = toml_parse_file('filename.toml')");
     }
     
-    if (!mxIsChar(prhs[0])) {
-        mexErrMsgIdAndTxt("toml_parse_file:invalidInput", 
-                          "Input must be a filename string");
+    // Extract filename using the helper function
+    std::string filename;
+    try {
+        filename = extractMatlabString(prhs[0]);
     }
-    
-    // Get filename
-    char* filename = mxArrayToString(prhs[0]);
-    if (!filename) {
-        mexErrMsgIdAndTxt("toml_parse_file:memoryError", 
-                          "Could not allocate memory for filename");
+    catch (...) {
+        mexErrMsgIdAndTxt("toml_parse_file:invalidInput", 
+                          "Input must be a filename (string or char array)");
     }
     
     // Parse TOML file
@@ -341,17 +393,13 @@ void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[]) {
         plhs[0] = convert_table(tbl);
     }
     catch (const toml::parse_error& err) {
-        mxFree(filename);
         std::string error_msg = "TOML parse error: ";
         error_msg += err.what();
         mexErrMsgIdAndTxt("toml_parse_file:parseError", error_msg.c_str());
     }
     catch (const std::exception& e) {
-        mxFree(filename);
         std::string error_msg = "Error: ";
         error_msg += e.what();
         mexErrMsgIdAndTxt("toml_parse_file:error", error_msg.c_str());
     }
-    
-    mxFree(filename);
 }
